@@ -1407,6 +1407,7 @@ func (b *MFABackend) mfaConfigToMap(mConfig *mfa.Config) (map[string]interface{}
 		}
 		respData["mount_accessor"] = mConfig.MountAccessor
 		respData["username_format"] = mConfig.UsernameFormat
+		respData["use_passcode"] = oktaConfig.UsePasscode
 	case *mfa.Config_DuoConfig:
 		duoConfig := mConfig.GetDuoConfig()
 		respData["api_hostname"] = duoConfig.APIHostname
@@ -1566,6 +1567,11 @@ func parseOktaConfig(mConfig *mfa.Config, d *framework.FieldData) error {
 		oktaConfig.PrimaryEmail = true
 	}
 
+	usePasscode := d.Get("use_passcode").(bool)
+	if usePasscode {
+		oktaConfig.UsePasscode = true
+	}
+
 	_, err := url.Parse(fmt.Sprintf("https://%s,%s", oktaConfig.OrgName, oktaConfig.BaseURL))
 	if err != nil {
 		return errwrap.Wrapf("error parsing given base_url: {{err}}", err)
@@ -1657,7 +1663,7 @@ func (c *Core) validateLoginMFAInternal(ctx context.Context, methodID string, en
 		return c.validateTOTP(ctx, mfaCreds, entityMFASecret, mConfig.ID, entity.ID, c.loginMFABackend.usedCodes, mConfig.GetTOTPConfig().MaxValidationAttempts)
 
 	case mfaMethodTypeOkta:
-		return c.validateOkta(ctx, mConfig, finalUsername)
+		return c.validateOkta(ctx, mfaCreds, mConfig, finalUsername)
 
 	case mfaMethodTypeDuo:
 		return c.validateDuo(ctx, mfaCreds, mConfig, finalUsername, reqConnectionRemoteAddress)
@@ -1895,7 +1901,7 @@ func (c *Core) validateDuo(ctx context.Context, creds []string, mConfig *mfa.Con
 	}
 }
 
-func (c *Core) validateOkta(ctx context.Context, mConfig *mfa.Config, username string) error {
+func (c *Core) validateOkta(ctx context.Context, creds []string, mConfig *mfa.Config, username string) error {
 	oktaConfig := mConfig.GetOktaConfig()
 	if oktaConfig == nil {
 		return fmt.Errorf("failed to get Okta configuration for method %q", mConfig.Name)
@@ -1910,7 +1916,7 @@ func (c *Core) validateOkta(ctx context.Context, mConfig *mfa.Config, username s
 		return err
 	}
 
-	ctx, client, err := okta.NewClient(ctx,
+	ctx, oktaClient, err := okta.NewClient(ctx,
 		okta.WithToken(oktaConfig.APIToken),
 		okta.WithOrgUrl(orgURL.String()),
 		// Do not use cache or polling MFA will not refresh
@@ -1927,7 +1933,7 @@ func (c *Core) validateOkta(ctx context.Context, mConfig *mfa.Config, username s
 	filterQuery := fmt.Sprintf("%s eq %q", filterField, username)
 	filter := query.NewQueryParams(query.WithFilter(filterQuery))
 
-	users, _, err := client.User.ListUsers(ctx, filter)
+	users, _, err := oktaClient.User.ListUsers(ctx, filter)
 	if err != nil {
 		return err
 	}
@@ -1940,7 +1946,7 @@ func (c *Core) validateOkta(ctx context.Context, mConfig *mfa.Config, username s
 
 	user := users[0]
 
-	factors, _, err := client.UserFactor.ListFactors(ctx, user.Id)
+	factors, _, err := oktaClient.UserFactor.ListFactors(ctx, user.Id)
 	if err != nil {
 		return err
 	}
@@ -1949,23 +1955,65 @@ func (c *Core) validateOkta(ctx context.Context, mConfig *mfa.Config, username s
 		return fmt.Errorf("no MFA factors found for user")
 	}
 
-	var factorFound bool
+	var passcode string
+	if len(creds) > 0 {
+		passcode = creds[0]
+	}
+
+	// When the user provides a passcode, we need to try each of their token* factors
+	// because we do not know which factor generated the token.
+	var passcodeUserFactorErrors map[*okta.UserFactor]error
+
 	var userFactor *okta.UserFactor
 	for _, factor := range factors {
 		if factor.IsUserFactorInstance() {
 			userFactor = factor.(*okta.UserFactor)
-			if userFactor.FactorType == "push" {
-				factorFound = true
-				break
+			switch userFactor.FactorType {
+			case "push":
+				if passcode != "" {
+					// push does not use passcode
+					continue
+				}
+
+				// FactorType "push" requires 2 steps to verify the factor:
+				// https://developer.okta.com/docs/reference/api/factors/#issue-a-push-factor-challenge
+				// https://developer.okta.com/docs/reference/api/factors/#verify-a-push-factor-challenge
+				return c.validateOktaPush(ctx, oktaClient, orgURL, user, userFactor)
+			case "token:software:totp", "token:hotp", "token", "token:hardware":
+				if passcode == "" {
+					// token* requires passcode
+					continue
+				}
+
+				// FactorTypes that require only one API call with a PassCode param.
+				// https://developer.okta.com/docs/reference/api/factors/#factors-that-require-only-a-verification-operation
+				err = c.validateOktaPassCode(ctx, oktaClient, user, userFactor, passcode)
+				if err != nil {
+					passcodeUserFactorErrors[userFactor] = err
+				} else {
+					// MFA token-type factor succeeded
+					return nil
+				}
 			}
 		}
 	}
 
-	if !factorFound {
-		return fmt.Errorf("no push-type MFA factor found for user")
+	if attemptedFactors := len(passcodeUserFactorErrors); attemptedFactors > 0 {
+		errs := []error{fmt.Errorf("okta authentication failed after trying %d factors", attemptedFactors)}
+		for userFactor, err = range passcodeUserFactorErrors {
+			errs = append(errs, fmt.Errorf("failed to verify MFA passcode using '%s' factor %s: %w", userFactor.FactorType, userFactor.Id, err))
+		}
+		return errors.Join(errs...)
 	}
 
-	result, _, err := client.UserFactor.VerifyFactor(ctx, user.Id, userFactor.Id, okta.VerifyFactorRequest{}, userFactor, nil)
+	if passcode == "" {
+		return fmt.Errorf("no push-type MFA factor found for user")
+	}
+	return fmt.Errorf("no token-type MFA factors found for user")
+}
+
+func (c *Core) validateOktaPush(ctx context.Context, oktaClient *okta.Client, orgURL *url.URL, user *okta.User, userFactor *okta.UserFactor) error {
+	result, _, err := oktaClient.UserFactor.VerifyFactor(ctx, user.Id, userFactor.Id, okta.VerifyFactorRequest{}, userFactor, nil)
 	if err != nil {
 		return err
 	}
@@ -1985,16 +2033,16 @@ func (c *Core) validateOkta(ctx context.Context, mConfig *mfa.Config, username s
 		return err
 	}
 	// Strip the org URL from the fully qualified poll URL
-	url, err := url.Parse(strings.Replace(links.Poll.Href, orgURL.String(), "", 1))
+	pollUrl, err := url.Parse(strings.Replace(links.Poll.Href, orgURL.String(), "", 1))
 	if err != nil {
 		return err
 	}
 
 	for {
 		// Okta provides an SDK method `GetFactorTransactionStatus` but does not provide the transaction id in
-		// the VerifyFactor respone. This code effectively reimplements that method.
-		rq := client.CloneRequestExecutor()
-		req, err := rq.WithAccept("application/json").WithContentType("application/json").NewRequest("GET", url.String(), nil)
+		// the VerifyFactor response. This code effectively reimplements that method.
+		rq := oktaClient.CloneRequestExecutor()
+		req, err := rq.WithAccept("application/json").WithContentType("application/json").NewRequest("GET", pollUrl.String(), nil)
 		if err != nil {
 			return err
 		}
@@ -2021,6 +2069,24 @@ func (c *Core) validateOkta(ctx context.Context, mConfig *mfa.Config, username s
 			return fmt.Errorf("push verification operation canceled")
 		case <-time.After(time.Second):
 		}
+	}
+}
+
+func (c *Core) validateOktaPassCode(ctx context.Context, oktaClient *okta.Client, user *okta.User, userFactor *okta.UserFactor, passcode string) error {
+	verifyFactorRequest := okta.VerifyFactorRequest{
+		PassCode: passcode,
+	}
+
+	result, _, err := oktaClient.UserFactor.VerifyFactor(ctx, user.Id, userFactor.Id, verifyFactorRequest, userFactor, nil)
+	if err != nil {
+		return err
+	}
+
+	switch result.FactorResult {
+	case "SUCCESS":
+		return nil
+	default: // https://developer.okta.com/docs/reference/api/factors/#factor-result
+		return fmt.Errorf("okta authentication failed: %q - %q", result.FactorResult, result.FactorResultMessage)
 	}
 }
 
