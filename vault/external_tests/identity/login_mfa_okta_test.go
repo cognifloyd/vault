@@ -11,6 +11,9 @@ import (
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/builtin/credential/okta"
 	"github.com/hashicorp/vault/builtin/credential/userpass"
+	"github.com/hashicorp/vault/helper/constants"
+	"github.com/hashicorp/vault/helper/testhelpers"
+	logicaltest "github.com/hashicorp/vault/helper/testhelpers/logical"
 	vaulthttp "github.com/hashicorp/vault/http"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault"
@@ -24,9 +27,9 @@ import (
 // OKTA_PASSWORD=<find in 1password>
 //
 // You will need to install the Okta client app on your mobile device and
-// setup MFA in order to use the Okta web UI.  This test does not exercise
+// setup MFA in order to use the Okta web UI. This test does not exercise
 // MFA however (which is an enterprise feature), and therefore the test
-// user in OKTA_USERNAME should not be configured with it.  Currently
+// user in OKTA_USERNAME should not be configured with it. Currently,
 // test3@example.com is not a member of testgroup, which is the group with
 // the profile that requires MFA. If you need to use a different group name
 // for the test group, you can set:
@@ -43,7 +46,7 @@ var identityOktaMFACoreConfig = &vault.CoreConfig{
 }
 
 func TestOktaEngineMFA(t *testing.T) {
-	if os.Getenv("VAULT_ACC") == "" {
+	if os.Getenv(logicaltest.TestEnvVar) == "" {
 		t.Skip("This test requires manual intervention and OKTA verify on cellphone is needed")
 	}
 
@@ -88,13 +91,16 @@ func TestOktaEngineMFA(t *testing.T) {
 		"password": os.Getenv("OKTA_PASSWORD"),
 	})
 	if err != nil {
-		t.Fatalf("error configuring okta group, %v", err)
+		t.Fatalf("error logging in, %v", err)
 	}
 }
 
 func TestInteg_PolicyMFAOkta(t *testing.T) {
-	if os.Getenv("VAULT_ACC") == "" {
+	if os.Getenv(logicaltest.TestEnvVar) == "" {
 		t.Skip("This test requires manual intervention and OKTA verify on cellphone is needed")
+	}
+	if !constants.IsEnterprise {
+		t.Skip("PolicyMFA is an enterprise-only feature")
 	}
 
 	cluster := vault.NewTestCluster(t, identityOktaMFACoreConfig, &vault.TestClusterOptions{
@@ -192,7 +198,7 @@ path "secret/foo" {
 }
 
 func TestInteg_LoginMFAOkta(t *testing.T) {
-	if os.Getenv("VAULT_ACC") == "" {
+	if os.Getenv(logicaltest.TestEnvVar) == "" {
 		t.Skip("This test requires manual intervention and OKTA verify on cellphone is needed")
 	}
 
