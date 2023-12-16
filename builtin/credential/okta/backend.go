@@ -335,14 +335,17 @@ func (b *backend) Login(ctx context.Context, req *logical.Request, username, pas
 		allGroups = append(allGroups, oktaGroups...)
 	}
 
-	canonicalUsername := username
+	// Use okta's login as the canonical username to avoid duplicate entities
+	// for `some.user`, `some.user@example.com`, and `Some.User@Example.Com`.
+	profile := *result.Embedded.User.Profile
+	canonicalUsername := profile["login"].(string)
 	cs := *cfg.CaseSensitiveUsernames
 	if !cs {
-		canonicalUsername = strings.ToLower(username)
+		canonicalUsername = strings.ToLower(canonicalUsername)
 	}
 
 	// Import the custom added groups from okta backend
-	user, err := b.User(ctx, req.Storage, canonicalUsername)
+	user, err := b.User(ctx, req.Storage, canonicalUsername) // TODO: migrate username -> canonicalUsername
 	if err != nil {
 		if b.Logger().IsDebug() {
 			b.Logger().Debug("error looking up user", "error", err)

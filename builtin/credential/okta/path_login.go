@@ -131,6 +131,17 @@ func (b *backend) pathLogin(ctx context.Context, req *logical.Request, d *framew
 		DisplayName: canonicalUsername,
 		Alias: &logical.Alias{
 			Name: canonicalUsername,
+			// TODO: Maybe add additional metadata from Okta.
+			//       b.Login could return result.Embedded.User.Profile map[string]interface{}
+			//       result.Embedded.User: https://developer.okta.com/docs/reference/api/authn/#user-object
+			//       Then, use config to select parts of profile to include in metadata
+			//       similar to the jwt/oidc role.ClaimMappings
+			//       NB: profile does not have much when embedded:
+			//           firstName, lastName, locale, login (aka username), timeZone
+			//           https://developer.okta.com/docs/reference/api/authn/#user-profile-object
+			//Metadata: map[string]string{
+			//	"name": username,
+			//},
 		},
 	}
 	cfg.PopulateTokenAuth(auth)
