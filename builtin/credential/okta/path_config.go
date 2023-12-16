@@ -14,6 +14,7 @@ import (
 	oktaold "github.com/chrismalek/oktasdk-go/okta"
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/vault/sdk/framework"
+	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/helper/tokenutil"
 	"github.com/hashicorp/vault/sdk/logical"
 	oktanew "github.com/okta/okta-sdk-golang/v2/okta"
@@ -144,6 +145,25 @@ func (b *backend) Config(ctx context.Context, s logical.Storage) (*ConfigEntry, 
 		result.TokenMaxTTL = result.MaxTTL
 	}
 
+	// copied from ldap backend.Config
+	var persistNeeded bool
+	if result.CaseSensitiveUsernames == nil {
+		// Upgrade from before switching to case-insensitive
+		result.CaseSensitiveUsernames = new(bool)
+		*result.CaseSensitiveUsernames = true
+		persistNeeded = true
+	}
+
+	if persistNeeded && (b.System().LocalMount() || !b.System().ReplicationState().HasState(consts.ReplicationPerformanceSecondary|consts.ReplicationPerformanceStandby)) {
+		entry, err := logical.StorageEntryJSON("config", result)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.Put(ctx, entry); err != nil {
+			return nil, err
+		}
+	}
+
 	return &result, nil
 }
 
@@ -197,6 +217,10 @@ func (b *backend) pathConfigWrite(ctx context.Context, req *logical.Request, d *
 	// operation, so just create a new one
 	if cfg == nil {
 		cfg = &ConfigEntry{}
+
+		// On create, default to case-insensitive (user-provided has precedence below).
+		cfg.CaseSensitiveUsernames = new(bool)
+		*cfg.CaseSensitiveUsernames = false
 	}
 
 	org, ok := d.GetOk("org_name")
@@ -248,6 +272,12 @@ func (b *backend) pathConfigWrite(ctx context.Context, req *logical.Request, d *
 		cfg.BypassOktaMFA = bypass.(bool)
 	}
 
+	cs, ok := d.GetOk("case_sensitive_usernames")
+	if ok {
+		cfg.CaseSensitiveUsernames = new(bool)
+		*cfg.CaseSensitiveUsernames = cs.(bool)
+	}
+
 	if err := cfg.ParseTokenFields(req, d); err != nil {
 		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 	}
@@ -260,6 +290,12 @@ func (b *backend) pathConfigWrite(ctx context.Context, req *logical.Request, d *
 
 		if err := tokenutil.UpgradeValue(d, "max_ttl", "token_max_ttl", &cfg.MaxTTL, &cfg.TokenMaxTTL); err != nil {
 			return logical.ErrorResponse(err.Error()), nil
+		}
+
+		if cfg.CaseSensitiveUsernames == nil {
+			// For upgrades, use backwards compatible default of true.
+			cfg.CaseSensitiveUsernames = new(bool)
+			*cfg.CaseSensitiveUsernames = true
 		}
 	}
 
@@ -363,13 +399,14 @@ func (c *ConfigEntry) OktaClient(ctx context.Context) (oktaShim, error) {
 type ConfigEntry struct {
 	tokenutil.TokenParams
 
-	Org           string        `json:"organization"`
-	Token         string        `json:"token"`
-	BaseURL       string        `json:"base_url"`
-	Production    *bool         `json:"is_production,omitempty"`
-	TTL           time.Duration `json:"ttl"`
-	MaxTTL        time.Duration `json:"max_ttl"`
-	BypassOktaMFA bool          `json:"bypass_okta_mfa"`
+	Org                    string        `json:"organization"`
+	Token                  string        `json:"token"`
+	BaseURL                string        `json:"base_url"`
+	Production             *bool         `json:"is_production,omitempty"`
+	TTL                    time.Duration `json:"ttl"`
+	MaxTTL                 time.Duration `json:"max_ttl"`
+	BypassOktaMFA          bool          `json:"bypass_okta_mfa"`
+	CaseSensitiveUsernames *bool         `json:"case_sensitive_usernames,omitempty"`
 }
 
 const pathConfigHelp = `

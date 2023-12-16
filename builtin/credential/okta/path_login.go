@@ -101,7 +101,7 @@ func (b *backend) pathLogin(ctx context.Context, req *logical.Request, d *framew
 
 	defer b.verifyCache.Delete(nonce)
 
-	policies, resp, groupNames, err := b.Login(ctx, req, username, password, totp, nonce, preferredProvider)
+	canonicalUsername, policies, resp, groupNames, err := b.Login(ctx, req, username, password, totp, nonce, preferredProvider)
 	// Handle an internal error
 	if err != nil {
 		return nil, err
@@ -128,9 +128,9 @@ func (b *backend) pathLogin(ctx context.Context, req *logical.Request, d *framew
 		InternalData: map[string]interface{}{
 			"password": password,
 		},
-		DisplayName: username,
+		DisplayName: canonicalUsername,
 		Alias: &logical.Alias{
-			Name: username,
+			Name: canonicalUsername,
 		},
 	}
 	cfg.PopulateTokenAuth(auth)
@@ -170,7 +170,7 @@ func (b *backend) pathLoginRenew(ctx context.Context, req *logical.Request, d *f
 
 	// No TOTP entry is possible on renew. If push MFA is enabled it will still be triggered, however.
 	// Sending "" as the totp will prompt the push action if it is configured.
-	loginPolicies, resp, groupNames, err := b.Login(ctx, req, username, password, "", nonce, "")
+	_, loginPolicies, resp, groupNames, err := b.Login(ctx, req, username, password, "", nonce, "")
 	if err != nil || (resp != nil && resp.IsError()) {
 		return resp, err
 	}

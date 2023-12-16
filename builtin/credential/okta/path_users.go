@@ -5,6 +5,7 @@ package okta
 
 import (
 	"context"
+	"strings"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -106,6 +107,14 @@ func (b *backend) pathUserRead(ctx context.Context, req *logical.Request, d *fra
 		return logical.ErrorResponse("Error empty name"), nil
 	}
 
+	cfg, err := b.getConfig(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if !*cfg.CaseSensitiveUsernames {
+		name = strings.ToLower(name)
+	}
+
 	user, err := b.User(ctx, req.Storage, name)
 	if err != nil {
 		return nil, err
@@ -126,6 +135,14 @@ func (b *backend) pathUserWrite(ctx context.Context, req *logical.Request, d *fr
 	name := d.Get("name").(string)
 	if len(name) == 0 {
 		return logical.ErrorResponse("Error empty name"), nil
+	}
+
+	cfg, err := b.getConfig(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if !*cfg.CaseSensitiveUsernames {
+		name = strings.ToLower(name)
 	}
 
 	groups := d.Get("groups").([]string)
