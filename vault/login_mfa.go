@@ -1962,7 +1962,7 @@ func (c *Core) validateOkta(ctx context.Context, creds []string, mConfig *mfa.Co
 
 	// When the user provides a passcode, we need to try each of their token* factors
 	// because we do not know which factor generated the token.
-	var passcodeUserFactorErrors map[*okta.UserFactor]error
+	passcodeUserFactorErrors := map[*okta.UserFactor]error{}
 
 	var userFactor *okta.UserFactor
 	for _, factor := range factors {
